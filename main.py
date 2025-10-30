@@ -1,16 +1,20 @@
 import os
-from fastapi import FastAPI, HTTPException
+import secrets
+from datetime import datetime, timedelta, timezone
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, EmailStr
+from typing import Optional, Literal
 from bson import ObjectId
 
 from database import db, create_document, get_documents
-from schemas import Product as ProductSchema, TryOnSession as TryOnSessionSchema
+from schemas import Product as ProductSchema, TryOnSession as TryOnSessionSchema, Organization as OrganizationSchema, ApiKey as ApiKeySchema, User as UserSchema
 
 import requests
+from passlib.context import CryptContext
+import jwt
 
-app = FastAPI(title="VisionFit API", version="1.0.0")
+app = FastAPI(title="VisionFit API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,6 +23,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Security helpers
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_ALG = "HS256"
+JWT_EXP_MIN = int(os.getenv("JWT_EXP_MIN", "1440"))  # 24h default
 
 # Helpers
 class IdModel(BaseModel):
@@ -30,9 +40,59 @@ def oid(id_str: str) -> ObjectId:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid id")
 
+# Auth models
+class SignupBody(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    organization_name: str
+
+class LoginBody(BaseModel):
+    email: EmailStr
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class MeResponse(BaseModel):
+    id: str
+    name: str
+    email: EmailStr
+    role: Literal['admin','member']
+    organization_id: str
+
+# Token utils
+
+def create_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=JWT_EXP_MIN))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALG)
+
+
+def get_current_user(authorization: str = Header(None)) -> dict:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        uid = payload.get("sub")
+        if not uid:
+            raise Exception("Invalid token")
+        doc = db["user"].find_one({"_id": oid(uid)})
+        if not doc:
+            raise Exception("User not found")
+        doc["id"] = str(doc.pop("_id"))
+        return doc
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
 @app.get("/")
 def root():
     return {"name": "VisionFit Backend", "status": "ok"}
+
 
 @app.get("/test")
 def test_database():
@@ -48,7 +108,96 @@ def test_database():
     response["fal_live"] = os.getenv("FAL_LIVE", "false")
     return response
 
-# Products
+# ============ AUTH & ORGS ============
+@app.post("/v1/auth/signup", response_model=TokenResponse)
+def signup(body: SignupBody):
+    # ensure email unique
+    if db["user"].find_one({"email": body.email}):
+        raise HTTPException(status_code=409, detail="Email already registered")
+    # create org
+    slug = body.organization_name.lower().strip().replace(" ", "-")
+    org = OrganizationSchema(name=body.organization_name, slug=slug, plan='free')
+    org_id = create_document("organization", org)
+    # create user
+    password_hash = pwd_context.hash(body.password)
+    user = UserSchema(name=body.name, email=body.email, password_hash=password_hash, organization_id=org_id, role='admin')
+    user_id = create_document("user", user)
+    # bootstrap an API key for convenience
+    raw_key = "vf_" + secrets.token_urlsafe(24)
+    api_key = ApiKeySchema(organization_id=org_id, label="Default Key", key=raw_key)
+    _ = create_document("apikey", api_key)
+    # token
+    token = create_token({"sub": user_id, "org": org_id, "role": "admin"})
+    return TokenResponse(access_token=token)
+
+
+@app.post("/v1/auth/login", response_model=TokenResponse)
+def login(body: LoginBody):
+    doc = db["user"].find_one({"email": body.email})
+    if not doc:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not pwd_context.verify(body.password, doc.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    user_id = str(doc["_id"]) 
+    org_id = doc.get("organization_id")
+    role = doc.get("role", "member")
+    token = create_token({"sub": user_id, "org": org_id, "role": role})
+    return TokenResponse(access_token=token)
+
+
+@app.get("/v1/me", response_model=MeResponse)
+def me(current_user: dict = Depends(get_current_user)):
+    return MeResponse(
+        id=current_user["id"],
+        name=current_user.get("name"),
+        email=current_user.get("email"),
+        role=current_user.get("role"),
+        organization_id=current_user.get("organization_id"),
+    )
+
+
+# Org + API keys
+class ApiKeyCreateBody(BaseModel):
+    label: str
+    scopes: Optional[list[str]] = None
+
+@app.get("/v1/org")
+def get_org(current_user: dict = Depends(get_current_user)):
+    org = db["organization"].find_one({"_id": oid(current_user["organization_id"])})
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    org["id"] = str(org.pop("_id"))
+    return org
+
+@app.get("/v1/org/apikeys")
+def list_api_keys(current_user: dict = Depends(get_current_user)):
+    items = get_documents("apikey", {"organization_id": current_user["organization_id"]})
+    for it in items:
+        it["id"] = str(it.pop("_id"))
+    return {"items": items}
+
+@app.post("/v1/org/apikeys")
+def create_api_key(body: ApiKeyCreateBody, current_user: dict = Depends(get_current_user)):
+    raw_key = "vf_" + secrets.token_urlsafe(24)
+    api_key = ApiKeySchema(
+        organization_id=current_user["organization_id"],
+        label=body.label,
+        key=raw_key,
+        scopes=body.scopes or ['tryon:read','tryon:write'],
+        active=True,
+    )
+    key_id = create_document("apikey", api_key)
+    return {"id": key_id, "key": raw_key}
+
+@app.post("/v1/org/apikeys/{key_id}/revoke")
+def revoke_api_key(key_id: str, current_user: dict = Depends(get_current_user)):
+    res = db["apikey"].update_one({"_id": oid(key_id), "organization_id": current_user["organization_id"]}, {"$set": {"active": False, "updated_at": datetime.now(timezone.utc)}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return {"status": "revoked"}
+
+
+# ============ PRODUCTS ============
 @app.post("/v1/products")
 def create_product(product: ProductSchema):
     product_id = create_document("product", product)
@@ -70,14 +219,29 @@ def get_product(product_id: str):
     doc["id"] = str(doc.pop("_id"))
     return doc
 
-# Try-on sessions
+
+# ============ TRY-ON SESSIONS ============
 class CreateSessionBody(BaseModel):
     product_id: str
     mode: Optional[str] = "face"
     source_image_url: Optional[str] = None
 
+
+def validate_api_key(x_api_key: Optional[str]) -> Optional[dict]:
+    if not x_api_key:
+        return None
+    key_doc = db["apikey"].find_one({"key": x_api_key, "active": True})
+    if not key_doc:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    key_doc["id"] = str(key_doc.pop("_id"))
+    return key_doc
+
 @app.post("/v1/tryon/sessions")
-def create_tryon_session(body: CreateSessionBody):
+def create_tryon_session(body: CreateSessionBody, x_api_key: Optional[str] = Header(None)):
+    # Validate API key if provided or if required by env
+    require_key = os.getenv("TRYON_REQUIRE_API_KEY", "false").lower() == "true"
+    key_info = validate_api_key(x_api_key) if (x_api_key or require_key) else None
+
     # Validate product exists
     prod = db["product"].find_one({"_id": oid(body.product_id)})
     if not prod:
@@ -102,8 +266,6 @@ def create_tryon_session(body: CreateSessionBody):
             fal_key = os.getenv("FAL_KEY")
             if not fal_key:
                 raise Exception("FAL_KEY not configured")
-            # Example call (this endpoint is illustrative)
-            # Replace with actual FAL model and payload when going live
             resp = requests.post(
                 "https://fal.run/fal-ai/your-model/execute",
                 headers={"Authorization": f"Key {fal_key}", "Content-Type": "application/json"},
@@ -115,13 +277,13 @@ def create_tryon_session(body: CreateSessionBody):
                         "model_url": prod.get("model_url"),
                         "type": prod.get("type"),
                     },
+                    "metadata": {"apikey_id": key_info.get("id") if key_info else None},
                 },
                 timeout=30,
             )
             if resp.status_code != 200:
                 raise Exception(f"FAL error {resp.status_code}: {resp.text[:120]}")
             data = resp.json()
-            # Suppose the API returns { result_url: "..." }
             result_url = data.get("result_url")
             message = "processed via FAL"
         except Exception as e:
@@ -153,6 +315,7 @@ def get_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     doc["id"] = str(doc.pop("_id"))
     return doc
+
 
 if __name__ == "__main__":
     import uvicorn

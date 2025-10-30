@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, EmailStr
 from typing import Optional, Literal
 
 # Organization represents a client account
@@ -14,6 +14,14 @@ class ApiKey(BaseModel):
     key: str = Field(..., description="Hashed or plain for demo")
     scopes: list[str] = Field(default_factory=lambda: ['tryon:read', 'tryon:write'])
     active: bool = Field(True)
+
+# User account
+class User(BaseModel):
+    name: str
+    email: EmailStr
+    password_hash: str
+    organization_id: str
+    role: Literal['admin','member'] = Field('admin')
 
 # Product catalog entry to try on
 class Product(BaseModel):
