@@ -1,13 +1,14 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [382] using StatReload
-INFO:     Started server process [384]
+INFO:     Started reloader process [429] using StatReload
+INFO:     Started server process [431]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     172.20.0.1:51944 - "HEAD / HTTP/1.1" 405 Method Not Allowed
-INFO:     172.20.0.1:51946 - "GET /v1/products HTTP/1.1" 200 OK
-INFO:     172.20.0.1:51946 - "GET /v1/products HTTP/1.1" 200 OK
-INFO:     172.20.0.1:51946 - "POST /v1/products HTTP/1.1" 500 Internal Server Error
+INFO:     172.20.0.1:43840 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     172.20.0.1:43850 - "GET /v1/products HTTP/1.1" 200 OK
+INFO:     172.20.0.1:43864 - "OPTIONS /v1/products HTTP/1.1" 200 OK
+INFO:     172.20.0.1:43850 - "GET /v1/products HTTP/1.1" 200 OK
+INFO:     172.20.0.1:43864 - "POST /v1/products HTTP/1.1" 500 Internal Server Error
 ERROR:    Exception in ASGI application
 Traceback (most recent call last):
   File "/usr/local/lib/python3.13/site-packages/uvicorn/protocols/http/h11_impl.py", line 408, in run_asgi
@@ -140,7 +141,7 @@ Traceback (most recent call last):
   File "/usr/local/lib/python3.13/site-packages/pymongo/message.py", line 762, in _op_msg
     return _op_msg_uncompressed(flags, command, identifier, docs, opts)
 bson.errors.InvalidDocument: cannot encode object: HttpUrl('https://example.com/models/visionpro.glb'), of type: <class 'pydantic.networks.HttpUrl'>
-INFO:     172.20.0.1:51948 - "POST /v1/products HTTP/1.1" 500 Internal Server Error
+INFO:     172.20.0.1:43850 - "POST /v1/products HTTP/1.1" 500 Internal Server Error
 ERROR:    Exception in ASGI application
 Traceback (most recent call last):
   File "/usr/local/lib/python3.13/site-packages/uvicorn/protocols/http/h11_impl.py", line 408, in run_asgi
